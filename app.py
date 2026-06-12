@@ -3,11 +3,8 @@ import streamlit as st
 import cv2
 import pandas as pd
 import os
-import threading
 import time
-from PIL import Image
-from detector import run_detection
-from alerter import send_alert
+from datetime import datetime
 
 # ─────────────────────────────────────────
 # PAGE CONFIG
@@ -17,6 +14,11 @@ st.set_page_config(
     page_icon="🦺",
     layout="wide"
 )
+
+# ─────────────────────────────────────────
+# DEMO MODE — True for cloud, False for local
+# ─────────────────────────────────────────
+DEMO_MODE = os.environ.get("DEMO_MODE", "true").lower() == "true"
 
 # ─────────────────────────────────────────
 # CUSTOM CSS
@@ -31,8 +33,6 @@ st.markdown("""
         text-align: center;
         border: 1px solid #2e3250;
     }
-    .violation { border-left: 4px solid #ff4b4b; }
-    .safe      { border-left: 4px solid #00c853; }
     .title-text {
         font-size: 2rem;
         font-weight: bold;
@@ -61,16 +61,20 @@ if "alerts"          not in st.session_state:
 st.markdown('<p class="title-text">🦺 SafeEye — Factory Safety Monitor</p>',
             unsafe_allow_html=True)
 st.markdown("**Real-time hard hat & safety vest detection with instant alerts**")
+
+if DEMO_MODE:
+    st.info("🌐 **Demo Mode** — Running on cloud. Webcam unavailable. [Clone & run locally](https://github.com/shantanutech7/safeeye) for live detection.")
+
 st.divider()
 
 # ─────────────────────────────────────────
-# LAYOUT — two columns
+# LAYOUT
 # ─────────────────────────────────────────
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.subheader("📹 Live Camera Feed")
-    frame_window = st.image([])
+    frame_window = st.empty()
     status_text  = st.empty()
 
 with col2:
@@ -79,7 +83,6 @@ with col2:
     metric_persons    = st.empty()
     metric_last       = st.empty()
     st.divider()
-
     st.subheader("🚨 Alert Log")
     alert_table = st.empty()
 
@@ -95,7 +98,7 @@ with col_stop:
     stop_btn  = st.button("⏹ Stop",             type="secondary", use_container_width=True)
 
 # ─────────────────────────────────────────
-# VIOLATION LOG TABLE
+# VIOLATION LOG
 # ─────────────────────────────────────────
 st.divider()
 st.subheader("📋 Violation History")
@@ -104,14 +107,46 @@ log_placeholder = st.empty()
 def load_log():
     log_file = "logs/violation_log.csv"
     if os.path.exists(log_file):
-        df = pd.read_csv(log_file)
-        return df
+        return pd.read_csv(log_file)
     return pd.DataFrame(columns=["Timestamp", "Screenshot", "Status"])
 
 # ─────────────────────────────────────────
-# ALERT CALLBACK — called by detector
+# DEMO DATA
+# ─────────────────────────────────────────
+DEMO_VIOLATIONS = [
+    {"Timestamp": "2026-06-12 09:15:32", "Screenshot": "violation_091532.jpg", "Status": "🔴 VIOLATION"},
+    {"Timestamp": "2026-06-12 09:38:47", "Screenshot": "violation_093847.jpg", "Status": "🔴 VIOLATION"},
+    {"Timestamp": "2026-06-12 10:02:11", "Screenshot": "violation_100211.jpg", "Status": "🔴 VIOLATION"},
+    {"Timestamp": "2026-06-12 10:45:58", "Screenshot": "violation_104558.jpg", "Status": "🔴 VIOLATION"},
+    {"Timestamp": "2026-06-12 11:20:03", "Screenshot": "violation_112003.jpg", "Status": "🔴 VIOLATION"},
+]
+
+# ─────────────────────────────────────────
+# DEMO MODE DISPLAY
+# ─────────────────────────────────────────
+def run_demo():
+    demo_df = pd.DataFrame(DEMO_VIOLATIONS)
+
+    # Show demo camera placeholder
+    frame_window.image(
+        "https://placehold.co/640x480/1e2130/00c8ff?text=SafeEye+Live+Feed%0ARun+Locally+for+Webcam",
+        use_container_width=True
+    )
+
+    status_text.success("🟢 Demo Mode Active")
+
+    metric_violations.metric("🚨 Total Violations", 5)
+    metric_persons.metric("👷 Persons Detected",   8)
+    metric_last.metric("⏱ Last Violation",        "11:20:03")
+
+    alert_table.dataframe(demo_df.tail(3), use_container_width=True)
+    log_placeholder.dataframe(demo_df, use_container_width=True)
+
+# ─────────────────────────────────────────
+# ALERT CALLBACK
 # ─────────────────────────────────────────
 def alert_callback(screenshot_path, timestamp):
+    from alerter import send_alert
     st.session_state.violation_count += 1
     st.session_state.last_violation   = timestamp
     st.session_state.alerts.append({
@@ -122,13 +157,12 @@ def alert_callback(screenshot_path, timestamp):
     send_alert(screenshot_path, timestamp)
 
 # ─────────────────────────────────────────
-# MAIN MONITORING LOOP
+# LIVE MONITORING LOOP (local only)
 # ─────────────────────────────────────────
 def monitoring_loop():
     from ultralytics import YOLO
-    import time
 
-    model = YOLO("yolov8n.pt")
+    model = YOLO("hardhat.pt")
     cap   = cv2.VideoCapture(0)
 
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
@@ -152,33 +186,34 @@ def monitoring_loop():
         if frame_count % 2 != 0:
             continue
 
-        results  = model(frame, conf=CONFIDENCE, verbose=False)
+        results         = model(frame, conf=CONFIDENCE, verbose=False)
         violation_found = False
         person_count    = 0
         violation_count = 0
 
         for result in results:
             for box in result.boxes:
-                cls        = int(box.cls[0])
-                conf       = float(box.conf[0])
+                cls          = int(box.cls[0])
+                conf_score   = float(box.conf[0])
                 x1,y1,x2,y2 = map(int, box.xyxy[0])
-                label_name = model.names[cls]
 
-                if cls == 0:  # person
-                    person_count    += 1
+                if cls == 1:  # NO-Hardhat — violation
                     violation_found  = True
                     violation_count += 1
-                    label = f"NO HARDHAT {conf:.0%}"
+                    person_count    += 1
+                    label = f"NO HARDHAT {conf_score:.0%}"
                     cv2.rectangle(frame, (x1,y1), (x2,y2), RED, 2)
-                    cv2.putText(frame, label, (x1,y1-10),
+                    cv2.putText(frame, label, (x1, y1-10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, WHITE, 2)
-                else:
-                    label = f"{label_name} {conf:.0%}"
+
+                elif cls == 0:  # Hardhat — safe
+                    person_count += 1
+                    label = f"HARDHAT OK {conf_score:.0%}"
                     cv2.rectangle(frame, (x1,y1), (x2,y2), GREEN, 2)
-                    cv2.putText(frame, label, (x1,y1-10),
+                    cv2.putText(frame, label, (x1, y1-10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 1)
 
-        # HUD
+        # HUD bar
         h, w = frame.shape[:2]
         cv2.rectangle(frame, (0,0), (w,35), (20,20,20), -1)
         cv2.putText(frame, "SafeEye v1.0", (10,25),
@@ -187,40 +222,29 @@ def monitoring_loop():
         cv2.putText(frame, f"Violations: {violation_count}", (w-200,25),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, v_color, 2)
 
-        # Update stats
         st.session_state.person_count = person_count
 
-        # Show frame in Streamlit
         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         frame_window.image(frame_rgb, use_container_width=True)
 
-        # Update metrics
         metric_violations.metric("🚨 Violations", st.session_state.violation_count)
         metric_persons.metric("👷 Persons Detected", person_count)
         metric_last.metric("⏱ Last Violation", st.session_state.last_violation)
 
-        # Alert log
         if st.session_state.alerts:
             alert_table.dataframe(
                 pd.DataFrame(st.session_state.alerts).tail(5),
                 use_container_width=True
             )
 
-        # Violation log from CSV
-        log_placeholder.dataframe(
-            load_log(),
-            use_container_width=True
-        )
+        log_placeholder.dataframe(load_log(), use_container_width=True)
 
-        # Trigger alert
         now = time.time()
         if violation_found and (now - last_alert) > ALERT_COOLDOWN:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            timestamp  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             last_alert = now
-
-            # Save screenshot
             os.makedirs("alerts", exist_ok=True)
-            path = f"alerts/violation_{time.strftime('%Y%m%d_%H%M%S')}.jpg"
+            path = f"alerts/violation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             cv2.imwrite(path, frame)
             alert_callback(path, timestamp)
 
@@ -232,12 +256,14 @@ def monitoring_loop():
 # ─────────────────────────────────────────
 # BUTTON LOGIC
 # ─────────────────────────────────────────
-if start_btn:
-    st.session_state.running = True
-    monitoring_loop()
+if DEMO_MODE:
+    run_demo()
+else:
+    if start_btn:
+        st.session_state.running = True
+        monitoring_loop()
 
-if stop_btn:
-    st.session_state.running = False
+    if stop_btn:
+        st.session_state.running = False
 
-# Show existing log on load
-log_placeholder.dataframe(load_log(), use_container_width=True)
+    log_placeholder.dataframe(load_log(), use_container_width=True)
